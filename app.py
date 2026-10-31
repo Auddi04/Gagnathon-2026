@@ -250,7 +250,10 @@ def spyrja_beint(spurning):
                 lykill = f"{valinn_ar}M{valinn_manudur}"
                 gildi = cpi_dict.get(lykill)
                 if gildi is not None:
-                    svor.append(f"Vísitala neysluverðs fyrir tímabil {lykill} var {gildi} stig.")
+                    manadarheiti = ["janúar", "febrúar", "mars", "apríl", "maí", "júní", "júlí",
+                                    "ágúst", "september", "október", "nóvember", "desember"][int(valinn_manudur) - 1]
+                    gildi_texti = f"{gildi:.1f}".replace(".", ",")  # íslensk tugabrotskomma: 630,3
+                    svor.append(f"Vísitala neysluverðs í {manadarheiti} {valinn_ar} var {gildi_texti} stig.")
                     heimildir.append("Hagstofa Íslands – Vísitala neysluverðs (VIS01002)")
 
     # 2. Búferlaflutningar (öll gögnin eru flutningar TIL höfuðborgarsvæðisins)

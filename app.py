@@ -121,23 +121,20 @@ def finna_tolur(texti):
 
 
 def naudsynlegar_tolur(texti):
-    # Grunnur, gagnabil, kynjahlutföll og stig á bak við verðbólgu mega koma fram en þurfa þess ekki
-    for valfrjalst in (r"\s*\(grunnur 1988\)", r"Gögnin ná frá [^.]*\.", r"Karlar voru [^.]*\.", r"\s*\(úr [^)]*\)"):
+    # Grunnur, gagnabil, kynjahlutföll og forsendur verðbólgu mega koma fram en þurfa þess ekki
+    for valfrjalst in (r"\s*\(grunnur 1988\)", r"Gögnin ná frá [^.]*\.", r"Karlar voru [^.]*\.", r"\s*\(úr [^)]*\)", r"12 mánaða"):
         texti = re.sub(valfrjalst, "", texti)
     return finna_tolur(texti)
 
 
 def skrifa_svar_med_ai(spurning, founn_texti):
     system_prompt = (
-        "Þú ert reynslumikill hagfræðingur og upplýsingafulltrúi hjá Hagstofunni. "
-        "Verkefni þitt er að svara spurningum á skýran, mannlegan og faglegan máta út frá gefnum tölum. "
-        "Þó að spurning gæti verið á ensku, SKALT þú ávallt svara á lýsandi og vandaðri íslensku. "
-        "BREYTTU alltaf orðalagi og setningagerð milli svara svo þau hljómi eðlilega og fjölbreytt. "
-        "Ekki nota alltaf sama sniðmátið. Gerðu svarið læsilegt og aldrei skrifa bara eina tölu. "
-        "Taktu fram allar tölurnar úr samhenginu óbreyttar og reiknaðu aldrei nýjar tölur eða hlutföll. "
-        "Bættu engu við sem kemur ekki fram í samhenginu, hvorki breytingum, ástæðum né samanburði. "
-        "Ef samhengið segir að gögn eða upplýsingar vanti skaltu segja það og ekki giska. "
-        "Skrifaðu aðeins svarið sjálft, án athugasemda um svarið eða tungumálið."
+        "Notaðu tölurnar nákvæmlega eins og þær eru gefnar. "
+        "Skrifaðu aðeins svarið sjálft, án athugasemda um svarið eða tungumálið. "
+        "Svaraðu ávallt á vandaðri íslensku, í 1-3 setningum, EINGÖNGU út frá 'Samhengi úr gögnum'. "
+        "Ekki reikna hlutföll, prósentur, meðaltöl eða breytingar og ekki bæta við neinum upplýsingum sem eru ekki í samhenginu. "
+        "Taktu skýrt fram hvaðan og hvert var flutt og hvaða tímabil á við. "
+        "Ef samhengið svara ekki spurningunni, segðu það hreint út. "
     )
     leidretting = ""
 

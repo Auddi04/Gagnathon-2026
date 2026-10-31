@@ -7,12 +7,12 @@ from sentence_transformers import SentenceTransformer
 # -------------------------------------------------------------------------
 # CONFIGURATION: Manually insert the PxWeb API URL and JSON query here
 # -------------------------------------------------------------------------
-PXWEB_API_URL = "https://px.hagstofa.is/pxis/api/v1/is/Ibuar/mannfjoldi/2_byggdir/sveitarfelog/MAN02001.px"
+PXWEB_API_URL = "https://px.hagstofa.is:443/pxis/api/v1/is/Efnahagur/thjodhagsspa/THJ07000.px"
 
 PXWEB_QUERY = {
   "query": [
     {
-      "code": "Sveitarfélög",
+      "code": "Efnahagur",
       "selection": {
         "filter": "all",
         "values": ["*"]
@@ -53,7 +53,7 @@ def run_ingestion():
     print("1. Loading embedding model (all-MiniLM-L6-v2)...")
     model = SentenceTransformer('all-MiniLM-L6-v2')
 
-    db_path = "./chroma_db"
+    db_path = "./chroma_db_master"
     if not os.path.exists(db_path):
         print(f"⚠️ Error: '{db_path}' directory not found. Please download and extract the master database from Google Drive first!")
         return

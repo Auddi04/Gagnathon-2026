@@ -242,7 +242,8 @@
       const heimildir = Array.isArray(gogn.heimildir) ? gogn.heimildir : [];
       const sek = ((Date.now() - byrjun) / 1000).toFixed(1);
       // Engin gögn notuð + spurningarmerki í svarinu = Hagur bað um nánari upplýsingar
-      opinSpurning = (heimildir.length === 0 && svar.includes("?")) ? sentSpurning : null;
+      const spyrAMoti = ("spyr_a_moti" in gogn) ? gogn.spyr_a_moti : (heimildir.length === 0 && svar.includes("?"));
+      opinSpurning = spyrAMoti ? sentSpurning : null;
 
       hugsar.remove();
       const kassi = div("msg hagur");

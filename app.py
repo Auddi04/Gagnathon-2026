@@ -3,6 +3,7 @@ import chromadb
 from sentence_transformers import SentenceTransformer
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import requests
 import json
@@ -287,8 +288,9 @@ def spyrja_beint(spurning):
     if any(w in spurning_lower for w in ["vísitala", "vísitöl", "neyslu", "cpi", "price index", "index", "verðbólg", "inflation"]):
         svor.append(svara_visitolu(spurning_lower))
 
-    # 2. Búferlaflutningar
-    if any(w in spurning_lower for w in ["fluttu", "búferla", "flutning", "karlar", "konur", "male", "woman", "women", "males", "men", "female", "females", "people", "moved", "migration"]):
+    # 2. Búferlaflutningar (öll gögnin eru flutningar TIL höfuðborgarsvæðisins)
+    if any(w in spurning_lower for w in ["flutt", "flyt", "búferla", "flutning", "karlar", "konur", "male", "woman",
+                                         "women", "men", "female", "people", "moved", "migration", "move"]):
         valinn_ar = None
         for word in spurning_lower.split():
             clean = word.strip("?.,!")
@@ -387,11 +389,17 @@ def spyrja_beint(spurning):
         lokatexti = "\n".join(svor)
         return skrifa_svar_med_ai(spurning, lokatexti)
     else:
-        return "Gat ekki túlkað fyrirspurnina eða fundið gögn út frá tiltæku metadata."
+        return "Gat ekki túlkað fyrirspurnina eða fundið gögn út frá tiltæku metadata"
 
 class SpurningRequest(BaseModel):
     spurning: str
 
 @app.post("/spyrja")
 def spyrja_vefthjon(req: SpurningRequest):
-    return {"svar": spyrja_beint(req.spurning)}
+    return spyrja_beint(req.spurning)
+
+
+# Vefviðmót: opnaðu http://127.0.0.1:8000 í vafra
+@app.get("/")
+def forsida():
+    return FileResponse("index.html")

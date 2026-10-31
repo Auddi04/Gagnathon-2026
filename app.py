@@ -3,9 +3,11 @@ import chromadb
 from sentence_transformers import SentenceTransformer
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import requests
 import json
+import re
 from threading import Lock
 import pandas as pd
 
@@ -53,6 +55,11 @@ METADATA_MIRROR = {
     "visitala": {"ars_bil": [], "manudir": []},
     "buferla": {"ars_bil": [], "svaedi": set()}
 }
+
+# (ár, brottflutningssvæði, kyn) -> fjöldi. Öll gögnin eru flutningar TIL höfuðborgarsvæðisins, aldur: alls.
+BUFERLA_GOGN = {}
+BUFERLA_LYSING = re.compile(r"Kyn: (\w+), Ár: (\d{4}), Brottflutningssvæði: (.+?) - brottfluttir, Aldur: Alls\.")
+
 
 @app.on_event("startup")
 def load_metadata_mirror():
@@ -110,36 +117,105 @@ def load_metadata_mirror():
     except Exception as e:
         print(f"❌ Villa við ChromaDB spegil: {e}")
 
+    # 3. Búferlaflutningar: lesum allar "aldur: alls" línur í RAM einu sinni
+    try:
+        offset = 0
+        while True:
+            results = collection.get(where={"gagnasett": "buferlaflutningar"}, limit=2000, offset=offset,
+                                     include=['documents', 'metadatas'])
+            docs, metas = results.get('documents', []), results.get('metadatas', [])
+            if not docs:
+                break
+            for doc, meta in zip(docs, metas):
+                m = BUFERLA_LYSING.search(doc)
+                if m:
+                    kyn, ar, svaedi = m.group(1), m.group(2), m.group(3)
+                    BUFERLA_GOGN[(ar, svaedi, kyn)] = int(float(str(meta.get('gildi', 0)).replace(',', '.')))
+            offset += 2000
+            if len(docs) < 2000:
+                break
+        print(f"✅ Búferlaflutningar í RAM: {len(BUFERLA_GOGN)} færslur.")
+    except Exception as e:
+        print(f"❌ Villa við að lesa búferlaflutninga: {e}")
+
     print("🚀 Allar spegilmyndir hlaðnar í RAM!")
+
+
+def _tolur(texti):
+    # "1.234" og "1,5" -> "1234" og "15" svo hægt sé að bera saman tölur
+    return set(re.sub(r"(?<=\d)[.,](?=\d)", "", t) for t in re.findall(r"\d[\d.,]*\d|\d", texti))
 
 
 def skrifa_svar_med_ai(spurning, founn_texti):
     system_prompt = (
-        "Þú ert reynslumikill hagfræðingur og upplýsingafulltrúi hjá Hagstofunni. "
-        "Verkefni þitt er að svara spurningum á skýran, mannlegan og faglegan máta út frá gefnum tölum. "
-        "Þó að spurning gæti verið á ensku, SKALT þú ávallt svara á lýsandi og vandaðri íslensku. "
-        "BREYTTU alltaf orðalagi og setningagerð milli svara svo þau hljómi eðlilega og fjölbreytt. "
-        "Ekki nota alltaf sama sniðmátið. Gerðu svarið læsilegt og aldrei skrifa bara eina tölu."
+        "Þú ert upplýsingafulltrúi hjá Hagstofu Íslands. "
+        "Svaraðu ávallt á vandaðri íslensku, í 1–3 setningum, EINGÖNGU út frá 'Samhengi úr gögnum'. "
+        "Notaðu tölurnar nákvæmlega eins og þær eru gefnar. "
+        "Ekki reikna hlutföll, prósentur, meðaltöl eða breytingar og ekki bæta við neinum upplýsingum sem eru ekki í samhenginu. "
+        "Taktu skýrt fram hvaðan og hvert var flutt og hvaða tímabil á við. "
+        "Ef samhengið svarar ekki spurningunni, segðu það hreint út."
     )
     full_prompt = f"{system_prompt}\n\nSamhengi úr gögnum:\n{founn_texti}\n\nSpurning: {spurning}\nSvar:"
     payload = {"model": MODEL_NAME, "prompt": full_prompt, "stream": False, "options": {"temperature": 0.2}}
-    
+
     try:
         with ollama_lock:
             response = requests.post(OLLAMA_URL, json=payload, timeout=120)
-        
-        if response.status_code == 200:
-            svar = response.json().get("response", "").strip()
-            return svar if svar else founn_texti
-        else:
+        if response.status_code != 200:
             return founn_texti
+        svar = response.json().get("response", "").strip()
+        if not svar:
+            return founn_texti
+        # Talnaprófun: ef líkanið nefnir tölu sem er hvorki í gögnunum né spurningunni, notum gögnin beint
+        leyfdar = _tolur(founn_texti) | _tolur(spurning)
+        aukatolur = _tolur(svar) - leyfdar
+        if aukatolur:
+            print(f"⚠ Líkanið bætti við tölum {aukatolur}; skila hreinum gögnum í staðinn.")
+            return founn_texti
+        # Heilleikaprófun: allar tölur úr gögnunum verða að koma fram í svarinu
+        vantar = _tolur(founn_texti) - _tolur(svar)
+        if vantar:
+            print(f"⚠ Líkanið sleppti tölum {vantar}; skila hreinum gögnum í staðinn.")
+            return founn_texti
+        # Áfangastaður má ekki týnast (öll búferlagögnin eru flutningar TIL höfuðborgarsvæðisins)
+        if "höfuðborgarsvæði" in founn_texti and "höfuðborg" not in svar.lower():
+            print("⚠ Líkanið sleppti áfangastað; skila hreinum gögnum í staðinn.")
+            return founn_texti
+        return svar
     except Exception:
         return founn_texti
+
+
+# Leitarorð -> (texti í svari, brottflutningssvæði í gögnunum). Röðin skiptir máli: sértækast fyrst.
+SVAEDI_ORD = [
+    (["norðurland eystra", "norðurlandi eystra", "norðurlands eystra", "northeast"], "Norðurlandi eystra", ["Norðurland eystra"]),
+    (["norðurland vestra", "norðurlandi vestra", "norðurlands vestra", "northwest"], "Norðurlandi vestra", ["Norðurland vestra"]),
+    (["norðurland", "north"], "Norðurlandi (eystra og vestra samanlagt)", ["Norðurland eystra", "Norðurland vestra"]),
+    (["vestfj", "westfjord"], "Vestfjörðum", ["Vestfirðir"]),
+    (["vesturland", "west"], "Vesturlandi", ["Vesturland"]),
+    (["austurland", "austfj", "east"], "Austurlandi", ["Austurland"]),
+    (["suðurnes", "reykjanes"], "Suðurnesjum", ["Suðurnes"]),
+    (["suðurland", "south"], "Suðurlandi", ["Suðurland"]),
+    (["útlönd", "erlendis", "abroad", "foreign"], "útlöndum", ["Útlönd"]),
+]
+HOFUDBORG_ORD = ["höfuðborg", "reykjav", "reikjav", "reykjarv", "capital"]
+
+
+def finna_svaedi(texti):
+    fundid = []
+    for ord_listi, heiti, svaedi in SVAEDI_ORD:
+        mynstur = r"\b(" + "|".join(re.escape(o) for o in ord_listi) + ")"
+        if re.search(mynstur, texti):
+            fundid.append((heiti, svaedi))
+            texti = re.sub(mynstur + r"\w*", " ", texti)  # svo "norðurland eystra" teljist ekki líka sem "norðurland"
+    return fundid
 
 
 def spyrja_beint(spurning):
     spurning_lower = spurning.lower()
     svor = []
+    heimildir = []
+    athugasemdir = []
     
     # 1. Athugum hvort spurt sé um vísitölu neysluverðs
     if any(w in spurning_lower for w in ["vísitala", "neyslu", "cpi", "price index", "index"]):
@@ -175,83 +251,60 @@ def spyrja_beint(spurning):
                 gildi = cpi_dict.get(lykill)
                 if gildi is not None:
                     svor.append(f"Vísitala neysluverðs fyrir tímabil {lykill} var {gildi} stig.")
+                    heimildir.append("Hagstofa Íslands – Vísitala neysluverðs (VIS01002)")
 
-    # 2. Búferlaflutningar
-    if any(w in spurning_lower for w in ["fluttu", "búferla", "flutning", "karlar", "konur", "male", "woman", "women", "males", "men", "female", "females", "people", "moved", "migration"]):
-        valinn_ar = None
-        for word in spurning_lower.split():
-            clean = word.strip("?.,!")
-            if clean.isdigit() and len(clean) == 4:
-                valinn_ar = clean
+    # 2. Búferlaflutningar (öll gögnin eru flutningar TIL höfuðborgarsvæðisins)
+    if any(w in spurning_lower for w in ["flutt", "flyt", "búferla", "flutning", "karlar", "konur", "male", "woman",
+                                         "women", "men", "female", "people", "moved", "migration", "move"]):
+        oll_ar = sorted({k[0] for k in BUFERLA_GOGN})
+        arin = sorted(set(re.findall(r"\b(\d{4})\b", spurning_lower)))
+        svaedin = finna_svaedi(spurning_lower)
+        timabil_texti = f"{oll_ar[0]}–{oll_ar[-1]}" if oll_ar else "?"
 
-        svæða_listi = ["suðurland", "suðurnes", "austurland", "vesturland", "vestfirðir", 
-                        "norðurland", "höfuðborgarsvæði", "norðurland eystra", "norðurland vestra", 
-                        "norðurland austur", "norðurland vestur"]
-
-        fundin_svæði = [s for s in svæða_listi if s in spurning_lower]
-        
-        sudur = ["south", "southern"]
-        nordur = ["north", "northern"]
-        east = ["east", "eastern"]
-        west = ["west", "western"]
-        reykjavik_orð = ["reykjavík", "reykjavikur", "reykjavik", "reykjavíkk", "reykjavikk", "reykjarvík", "reykjavíkur", "reikjavík", "capital", "reykjavik"]
-        
-        if any(r in spurning_lower for r in sudur) and not fundin_svæði:
-            fundin_svæði = ["suðurland"]
-        if any(r in spurning_lower for r in east) and not fundin_svæði:
-            fundin_svæði = ["austurland"]
-        if any(r in spurning_lower for r in west) and not fundin_svæði:
-            fundin_svæði = ["vesturland"]
-        if any(r in spurning_lower for r in nordur) and not fundin_svæði:
-            fundin_svæði = ["norðurland"]
-        if any(r in spurning_lower for r in reykjavik_orð) and not fundin_svæði:
-            fundin_svæði = ["höfuðborgarsvæði"]
-
-        if valinn_ar and fundin_svæði:
-            valin_svæði = fundin_svæði[0]
-            niðurstöður = {"alls": 0.0, "karlar": 0.0, "konur": 0.0}
-            documents, metadatas = [], []
-            batch_size, offset = 2000, 0
-        
-            while True:
-                results = collection.get(where={"gagnasett": "buferlaflutningar"}, limit=batch_size, offset=offset, include=['documents', 'metadatas'])
-                batch_docs, batch_metas = results.get('documents', []), results.get('metadatas', [])
-                if not batch_docs: break
-                documents.extend(batch_docs)
-                metadatas.extend(batch_metas)
-                offset += batch_size
-                if len(batch_docs) < batch_size: break
-
-            for doc, meta in zip(documents, metadatas):
-                doc_lower = doc.lower()
-                if valinn_ar in doc_lower and valin_svæði in doc_lower:
-                    try:
-                        val = float(str(meta.get('gildi') or meta.get('fjöldi') or '0').replace(',', '.'))
-                        if "aldur: alls" in doc_lower or "aldur:alls" in doc_lower:
-                            if "alls" in doc_lower and "karl" not in doc_lower and "kon" not in doc_lower: 
-                                niðurstöður["alls"] = val
-                            elif "karl" in doc_lower and "kon" not in doc_lower: 
-                                niðurstöður["karlar"] = val
-                            elif ("konur" in doc_lower or "kona" in doc_lower) and "karl" not in doc_lower: 
-                                niðurstöður["konur"] = val
-                    except ValueError: 
-                        pass
-        
-            if niðurstöður["alls"] == 0: 
-                niðurstöður["alls"] = niðurstöður["karlar"] + niðurstöður["konur"]
-        
-            buferla_texti = f"Heildarfjöldi þeirra sem fluttu frá {valin_svæði.capitalize()} árið {valinn_ar} var {int(niðurstöður['alls'])} (þar af {int(niðurstöður['karlar'])} karlar og {int(niðurstöður['konur'])} konur)."
-            svor.append(buferla_texti)
+        if not svaedin:
+            if any(h in spurning_lower for h in HOFUDBORG_ORD):
+                athugasemdir.append(
+                    "Gögnin sem ég hef ná aðeins yfir flutninga TIL höfuðborgarsvæðisins frá öðrum landsvæðum. "
+                    "Frá hvaða landsvæði viltu skoða? (t.d. Norðurland, Austurland, Suðurland, Vestfirðir, Suðurnes, útlönd)")
+            else:
+                athugasemdir.append("Frá hvaða landsvæði viltu skoða flutninga til höfuðborgarsvæðisins? "
+                                    "(t.d. Norðurland, Austurland, Suðurland, Vestfirðir, Suðurnes, útlönd)")
+        elif not arin:
+            athugasemdir.append(f"Hvaða ár viltu skoða? Gögn um búferlaflutninga ná yfir árin {timabil_texti}.")
+        else:
+            for ar in arin:
+                if ar not in oll_ar:
+                    athugasemdir.append(f"Engin gögn um búferlaflutninga fyrir árið {ar}. Gögnin ná yfir {timabil_texti}.")
+                    continue
+                for heiti, svaedi in svaedin:
+                    tolur = {kyn: sum(BUFERLA_GOGN.get((ar, sv, kyn), 0) for sv in svaedi)
+                             for kyn in ("Alls", "Karlar", "Konur")}
+                    svor.append(f"Árið {ar} fluttu {tolur['Alls']} manns frá {heiti} til höfuðborgarsvæðisins, "
+                                f"þar af {tolur['Karlar']} karlar og {tolur['Konur']} konur.")
+            if svor:
+                heimildir.append("Hagstofa Íslands – Búferlaflutningar milli landsvæða, til höfuðborgarsvæðisins")
 
     if svor:
         lokatexti = "\n".join(svor)
-        return skrifa_svar_med_ai(spurning, lokatexti)
-    else:
-        return "Gat ekki túlkað fyrirspurnina eða fundið gögn út frá tiltæku metadata."
+        svar = skrifa_svar_med_ai(spurning, lokatexti)
+        if athugasemdir:
+            svar += "\n\n" + "\n".join(athugasemdir)
+        return {"svar": svar, "heimildir": heimildir}
+    if athugasemdir:
+        return {"svar": "\n".join(athugasemdir), "heimildir": []}
+    return {"svar": "Ég fann ekki gögn sem svara þessu. Ég get svarað spurningum um vísitölu neysluverðs "
+                    "(ár og mánuður) og búferlaflutninga til höfuðborgarsvæðisins (landsvæði og ár).",
+            "heimildir": []}
 
 class SpurningRequest(BaseModel):
     spurning: str
 
 @app.post("/spyrja")
 def spyrja_vefthjon(req: SpurningRequest):
-    return {"svar": spyrja_beint(req.spurning)}
+    return spyrja_beint(req.spurning)
+
+
+# Vefviðmót: opnaðu http://127.0.0.1:8000 í vafra
+@app.get("/")
+def forsida():
+    return FileResponse("index.html")

@@ -4,5 +4,10 @@ chromadb
 sentence-transformers
 requests
 pydantic
+<<<<<<< HEAD
 openpyxl
 pandas
+=======
+pandas
+openpyxl
+>>>>>>> edil-track1

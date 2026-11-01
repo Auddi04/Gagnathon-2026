@@ -1,12 +1,10 @@
 """
-Sækir töflurnar í toflur.py úr PX-vefþjónustu Hagstofunnar og byggir gagnagrunn spjallmennisins.
-
-    gogn/hagstofa.db      tölurnar sjálfar, svo uppflettingar séu nákvæmar (SQLite)
-    gogn/chroma_toflur/   vigrar með lýsingu hverrar töflu, svo finna megi rétta töflu út frá spurningu
+Sækir töflurnar í toflur.py úr PX-vefþjónustu Hagstofunnar í gogn/hagstofa.db (SQLite).
+Leitin að réttri töflu er byggð úr lýsingunum í toflur.py þegar appið ræsist.
 
 Keyrsla:
     python ingest.py              sækir allar töflur
-    python ingest.py MAN02005     sækir aðeins þessa töflu og byggir leitina upp á nýtt
+    python ingest.py MAN02005     sækir aðeins þessa töflu
 """
 import itertools
 import os
@@ -14,18 +12,13 @@ import sqlite3
 import sys
 import time
 
-import chromadb
 import requests
-from sentence_transformers import SentenceTransformer
 
 from toflur import TOFLUR
 
 API_URL = "https://px.hagstofa.is/pxis/api/v1/is"
 GOGN_DIR = "gogn"
 DB_PATH = os.path.join(GOGN_DIR, "hagstofa.db")
-CHROMA_DIR = os.path.join(GOGN_DIR, "chroma_toflur")
-LEIT_NAFN = "hagstofa_toflur"
-EMBED_MODEL = "BAAI/bge-m3"
 
 
 def saekja_toflu(tafla):
@@ -80,24 +73,6 @@ def vista_toflu(con, tafla, titill, uppfaert, viddir, linur):
                     ((kodi, "\x1f".join(lina[:-1]), lina[-1]) for lina in linur))
 
 
-def byggja_leit(con):
-    print(f"Byggi leit með {EMBED_MODEL}...")
-    model = SentenceTransformer(EMBED_MODEL)
-    client = chromadb.PersistentClient(path=CHROMA_DIR)
-    try:
-        client.delete_collection(LEIT_NAFN)
-    except Exception:
-        pass
-    leit = client.create_collection(LEIT_NAFN, metadata={"hnsw:space": "cosine"})
-
-    til = {k for (k,) in con.execute("SELECT kodi FROM toflur")}
-    toflur = [t for t in TOFLUR if t["kodi"] in til and not t.get("adeins_serhlutur")]
-    lysingar = [t["lysing"] for t in toflur]
-    leit.add(ids=[t["kodi"] for t in toflur], documents=lysingar,
-             embeddings=model.encode(lysingar, normalize_embeddings=True).tolist())
-    print(f"✅ Leit tilbúin með {len(toflur)} töflum.")
-
-
 def main(koda=None):
     os.makedirs(GOGN_DIR, exist_ok=True)
     con = sqlite3.connect(DB_PATH)
@@ -123,7 +98,6 @@ def main(koda=None):
             print(f"❌ {tafla['kodi']}: {e}")
         time.sleep(1)  # vefþjónustan takmarkar fjölda fyrirspurna
 
-    byggja_leit(con)
     con.close()
     if villur:
         print(f"⚠️ Tókst ekki að sækja: {', '.join(villur)}")

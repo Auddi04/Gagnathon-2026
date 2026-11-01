@@ -4,3 +4,4 @@ __pycache__/
 .env
 __MACOSXchroma_db_master/
 chroma_db_master/
+gogn/chroma_toflur/

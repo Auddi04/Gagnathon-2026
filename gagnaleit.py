@@ -15,7 +15,6 @@ from toflur import TOFLUR
 
 GOGN_DIR = "gogn"
 DB_PATH = os.path.join(GOGN_DIR, "hagstofa.db")
-CHROMA_DIR = os.path.join(GOGN_DIR, "chroma_toflur")
 LEIT_NAFN = "hagstofa_toflur"
 
 # Lágmarkslíkindi fyrir vigurleit ef ekkert leitarorð passar
@@ -32,8 +31,8 @@ MANADA_HEITI = ["janúar", "febrúar", "mars", "apríl", "maí", "júní", "júl
 ORD_SEM_ERU_EKKI_STADIR = {"íslandi", "ísland", "iceland", "landinu", "ári", "árinu", "árið", "fyrra"}
 
 
-def hlada_gogn():
-    """Les allar töflur í minni. Skilar fjölda taflna, eða 0 ef ingest.py hefur ekki verið keyrt."""
+def hlada_gogn(embed_model):
+    """Les allar töflur í minni og byggir töfluleitina. Skilar fjölda taflna, eða 0 ef ingest.py hefur ekki verið keyrt."""
     global leit
     if not os.path.exists(DB_PATH):
         print("⚠️ Fann ekki gogn/hagstofa.db. Keyrðu: python ingest.py")
@@ -48,7 +47,12 @@ def hlada_gogn():
         GOGN[kodi] = {"titill": titill, "viddir": viddir, "gildi": gildi}
     con.close()
 
-    leit = chromadb.PersistentClient(path=CHROMA_DIR).get_collection(LEIT_NAFN)
+    # Leitin er aðeins í minni: ChromaDB breytir skránum sínum við ræsingu, svo þær eiga ekki heima í git
+    toflur = [t for t in TOFLUR if t["kodi"] in GOGN and not t.get("adeins_serhlutur")]
+    lysingar = [t["lysing"] for t in toflur]
+    leit = chromadb.EphemeralClient().get_or_create_collection(LEIT_NAFN, metadata={"hnsw:space": "cosine"})
+    leit.upsert(ids=[t["kodi"] for t in toflur], documents=lysingar,
+                embeddings=embed_model.encode(lysingar, normalize_embeddings=True).tolist())
     return len(GOGN)
 
 

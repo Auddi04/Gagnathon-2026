@@ -55,7 +55,7 @@ BUFERLA_GOGN = {}
 def hlada_gogn():
     print("⏳ Hleð gögnum í minni...")
     print(f"✅ Vísitala neysluverðs: {len(cpi_dict)} mánuðir.")
-    print(f"✅ Töflur Hagstofunnar: {gagnaleit.hlada_gogn()}.")
+    print(f"✅ Töflur Hagstofunnar: {gagnaleit.hlada_gogn(embed_model)}.")
 
     if "MAN01002" in gagnaleit.GOGN:
         tafla = gagnaleit.GOGN["MAN01002"]

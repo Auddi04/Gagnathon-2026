@@ -85,11 +85,12 @@ ollama pull llama3
 ```
 Ollama runs in the background after installing. If it doesn't, run `ollama serve` in a separate terminal.
 
-### 4. Build the database
+### 4. Refresh the database (optional)
 ```powershell
 python ingest.py
 ```
-This downloads the tables in `toflur.py` from Statistics Iceland's PX API into `gogn/` (about 7 MB).
+You can skip this: `gogn/hagstofa.db` comes with the code. Running it downloads the latest figures for the tables
+in `toflur.py` from Statistics Iceland's PX API.
 The Google Drive database from `README Track_1.md` is no longer needed.
 
 ### 5. Run
@@ -124,7 +125,7 @@ It prints ✅/❌ per question with response time and saves a table to `nidursto
 ## Adding a table
 
 1. Add an entry to `TOFLUR` in `toflur.py` (its table ID, path, description and search words; the fields are explained at the top of the file).
-2. Run `python ingest.py <table ID>`.
+2. Run `python ingest.py <table ID>` and restart the server.
 3. Add a question with a verified answer to `test_spurningar.py`.
 
 ## Known limitations
@@ -148,8 +149,8 @@ It prints ✅/❌ per question with response time and saves a table to `nidursto
 | `app.py` | FastAPI backend: routing, price index and migration answers, Ollama call, number check |
 | `gagnaleit.py` | Generic lookup: finds the right table and the exact figure |
 | `toflur.py` | List of tables and the words that select values in them |
-| `ingest.py` | Downloads the tables and builds `gogn/` |
-| `gogn/` | The database: `hagstofa.db` (figures) and `chroma_toflur/` (table search) |
+| `ingest.py` | Downloads the tables into `gogn/hagstofa.db` |
+| `gogn/hagstofa.db` | The figures. The table search is built from `toflur.py` in memory at startup |
 | `index.html` | Web chat interface (served at `/`) |
 | `test_spurningar.py` | Test set with verified answers |
 | `VIS01002_….xlsx` | Consumer price index data |

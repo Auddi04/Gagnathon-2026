@@ -15,12 +15,23 @@ and answers in Icelandic with the **numbers, units and source**.
 
 ## What it can answer
 
-| Topic | Coverage | You need to give |
-|---|---|---|
-| **Domestic migration** to the capital area (from other regions and from abroad), by sex | 2001–2025 | region + year |
-| **Consumer price index** (base 1988 = 100), monthly | Dec 1999 – Jul 2026 | month + year |
+| Topic | Coverage | Table | Example |
+|---|---|---|---|
+| **Migration between regions**, by sex | 1986–2025 | MAN01002 | „Hvað fluttu margir frá höfuðborgarsvæðinu til Suðurlands 2024?“ |
+| **Migration to and from Iceland**, by citizenship | 1961–2025 | MAN01400 | „Hversu margir erlendir ríkisborgarar fluttu til landsins 2024?“ |
+| **Population** by municipality and region, by sex | 1998–2026 | MAN02005, MAN03250 | „Hvað búa margir á Akureyri?“ |
+| **Population of Iceland** | 1703–2026 | MAN00000 | „Hver var mannfjöldi á Íslandi árið 1900?“ |
+| **Births** and **deaths** | 1951–2025, 1841–2025 | MAN05100, MAN05210 | „Hvað fæddust mörg börn árið 2024?“ |
+| **Unemployment**, by sex, age and area | 2003–2025 | VIN00921 | „Hvert var atvinnuleysi 2024?“ |
+| **Wages**, by occupation, sector and sex | 2014–2025 | VIN02002 | „Hver voru meðallaun 2024?“ |
+| **GDP**, national income, consumption, trade | 1995–2025 | THJ01102 | „Hver var landsframleiðslan 2023?“ |
+| **GDP per capita** | 1980–2024 | THJ01401 | „Hver var landsframleiðsla á mann 2023?“ |
+| **Overnight stays and arrivals**, by region and month | 1998–2026 | SAM01601 | „Hvað voru margar gistinætur 2024?“ |
+| **Passengers through Keflavík airport** | 2002–2026 | SAM02001 | „Hvað fóru margir farþegar um Keflavíkurflugvöll í júlí 2025?“ |
+| **Consumer price index** (base 1988 = 100) and inflation, monthly | Dec 1999 – Jul 2026 | VIS01002 | „Hver var vísitala neysluverðs í júní 2024?“ |
 
-If the region or year is missing, Hagur asks back. You can then just answer, e.g. „2014“.
+Without a year, the population, unemployment, wage and similar tables answer for the latest year and say which.
+Migration questions and the price index ask back if the year, region or month is missing. You can then just answer, e.g. „2014“.
 Questions outside the data get an honest „I don't have data on that“.
 
 ## How it works
@@ -30,9 +41,11 @@ Browser (index.html)
    │  POST /spyrja  {"spurning": "..."}
    ▼
 FastAPI (app.py)
-   ├─ Keyword routing: price index or migration?
    ├─ Price index  → cached Excel table (VIS01002) in RAM
-   ├─ Migration    → ChromaDB (hagstofa_master), loaded into RAM at startup
+   ├─ Migration    → table MAN01002 from SQLite, in RAM
+   ├─ Anything else → ChromaDB vector search (BGE-M3) plus keywords find the right table,
+   │                  then its labels (year, place, sex...) are matched to the question
+   │                  and the exact figure is read from SQLite (gagnaleit.py)
    ├─ Builds a short, exact fact text with the figures
    ▼
 Ollama (llama3) words the answer in Icelandic
@@ -50,7 +63,7 @@ looked up and verified.
 
 ## Setup (Windows)
 
-Requirements: **Python 3.10+**, **Git**, about **10 GB** free disk (models + database).
+Requirements: **Python 3.10+**, **Git**, about **10 GB** free disk (models).
 
 ### 1. Get the code
 ```powershell
@@ -58,33 +71,26 @@ git clone https://github.com/Auddi04/Gagnathon-2026.git
 cd Gagnathon-2026
 ```
 
-### 2. Get the database
-Download the pre-built database archive linked in `README Track_1.md` (Google Drive) and unzip it.
-`app.py` expects the ChromaDB folder at **`./chroma_db_master`** next to `app.py`.
-
-If the unzipped folder is called `chroma_db`, either rename it to `chroma_db_master`, or, if you keep it
-somewhere else, create a link instead of copying 190 MB:
-```powershell
-New-Item -ItemType Junction -Path ".\chroma_db_master" -Target "C:\path\to\chroma_db"
-```
-Check it works (should print `[('hagstofa_master', 62267)]` after step 3):
-```powershell
-python -c "import chromadb; c=chromadb.PersistentClient(path='chroma_db_master'); print([(x.name, x.count()) for x in c.list_collections()])"
-```
-
-### 3. Python environment
+### 2. Python environment
 ```powershell
 python -m venv venv
 venv\Scripts\activate
 pip install -r requirements_file.txt
 ```
 
-### 4. Ollama (local language model)
+### 3. Ollama (local language model)
 Install from https://ollama.com (or `irm https://ollama.com/install.ps1 | iex`), then:
 ```powershell
 ollama pull llama3
 ```
 Ollama runs in the background after installing. If it doesn't, run `ollama serve` in a separate terminal.
+
+### 4. Build the database
+```powershell
+python ingest.py
+```
+This downloads the tables in `toflur.py` from Statistics Iceland's PX API into `gogn/` (about 7 MB).
+The Google Drive database from `README Track_1.md` is no longer needed.
 
 ### 5. Run
 ```powershell
@@ -106,8 +112,8 @@ Wait for `Application startup complete.`, then open **http://127.0.0.1:8000**.
 curl.exe -X POST "http://127.0.0.1:8000/spyrja" -H "Content-Type: application/json" -d '{\"spurning\": \"Hvað fluttu margir frá Austurlandi 2015?\"}'
 ```
 
-**Automatic test set:** 14 questions whose correct answers were checked directly against the database
-and the Excel file. With the server running, in a second terminal:
+**Automatic test set:** questions whose correct answers were checked directly against Statistics Iceland's
+PX API and the Excel file. With the server running, in a second terminal:
 ```powershell
 python test_spurningar.py
 ```
@@ -115,27 +121,38 @@ It prints ✅/❌ per question with response time and saves a table to `nidursto
 
 ---
 
+## Adding a table
+
+1. Add an entry to `TOFLUR` in `toflur.py` (its table ID, path, description and search words; the fields are explained at the top of the file).
+2. Run `python ingest.py <table ID>`.
+3. Add a question with a verified answer to `test_spurningar.py`.
+
 ## Known limitations
 
 - **Each question stands on its own.** Hagur remembers a question only when it has asked back
   (e.g. „Hvaða ár?“). „En 2016?“ after an answer does not work.
-- **Migration data covers moves *to* the capital area only**, all ages combined. Moves from the capital
-  area to other regions are not in the data.
+- **All ages combined.** Population, migration and death figures are stored for all ages only, to keep the database small.
 - **Price index needs a month.** „Vísitalan 2020“ without a month is not answered.
-- **Keyword routing.** Unusual phrasing or misspelled place names may not be understood.
+- **Word matching.** Unusual phrasing or misspelled place names may not be understood. A place is only noticed as
+  unknown if it starts with a capital letter, so a lowercase unknown place can get the figure for the whole country,
+  which the answer labels without a place name.
+- **Towns are answered by municipality.** „Selfoss“ gives Sveitarfélagið Árborg, and the answer names the municipality.
+- **„Ferðamenn“ means foreign passengers through Keflavík airport**, the closest measure in the data.
+- **The language model can word things badly.** The number check catches wrong figures, not poor Icelandic.
 - **Speed:** about 5–15 s per answer, almost all of it the local language model.
-- `ingest.py` (from the starter kit) uses a different embedding model and collection than `app.py`,
-  so tables added with it are not used by the chatbot without changes.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `app.py` | FastAPI backend: routing, data lookup, Ollama call, number check |
+| `app.py` | FastAPI backend: routing, price index and migration answers, Ollama call, number check |
+| `gagnaleit.py` | Generic lookup: finds the right table and the exact figure |
+| `toflur.py` | List of tables and the words that select values in them |
+| `ingest.py` | Downloads the tables and builds `gogn/` |
+| `gogn/` | The database: `hagstofa.db` (figures) and `chroma_toflur/` (table search) |
 | `index.html` | Web chat interface (served at `/`) |
 | `test_spurningar.py` | Test set with verified answers |
 | `VIS01002_….xlsx` | Consumer price index data |
 | `requirements_file.txt` | Python dependencies |
-| `ingest.py` | Starter script for adding PX-API tables (see limitations) |
 
 Data: Statistics Iceland (Hagstofa Íslands), open data.

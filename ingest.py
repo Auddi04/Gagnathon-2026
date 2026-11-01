@@ -1,90 +1,134 @@
+"""
+Sækir töflurnar í toflur.py úr PX-vefþjónustu Hagstofunnar og byggir gagnagrunn spjallmennisins.
+
+    gogn/hagstofa.db      tölurnar sjálfar, svo uppflettingar séu nákvæmar (SQLite)
+    gogn/chroma_toflur/   vigrar með lýsingu hverrar töflu, svo finna megi rétta töflu út frá spurningu
+
+Keyrsla:
+    python ingest.py              sækir allar töflur
+    python ingest.py MAN02005     sækir aðeins þessa töflu og byggir leitina upp á nýtt
+"""
+import itertools
 import os
-import requests
-import json
+import sqlite3
+import sys
+import time
+
 import chromadb
+import requests
 from sentence_transformers import SentenceTransformer
 
-# -------------------------------------------------------------------------
-# CONFIGURATION: Manually insert the PxWeb API URL and JSON query here
-# -------------------------------------------------------------------------
-PXWEB_API_URL = "https://px.hagstofa.is:443/pxis/api/v1/is/Efnahagur/thjodhagsspa/THJ07000.px"
+from toflur import TOFLUR
 
-PXWEB_QUERY = {
-  "query": [
-    {
-      "code": "Efnahagur",
-      "selection": {
-        "filter": "all",
-        "values": ["*"]
-      }
-    }
-  ],
-  "response": {
-    "format": "json-stat2"
-  }
-}
+API_URL = "https://px.hagstofa.is/pxis/api/v1/is"
+GOGN_DIR = "gogn"
+DB_PATH = os.path.join(GOGN_DIR, "hagstofa.db")
+CHROMA_DIR = os.path.join(GOGN_DIR, "chroma_toflur")
+LEIT_NAFN = "hagstofa_toflur"
+EMBED_MODEL = "BAAI/bge-m3"
 
-def fetch_and_process_pxweb_data(url: str, query: dict) -> list[dict]:
-    """Fetches data from Statistics Iceland PxWeb API and formats it into text chunks for RAG."""
-    print(f"Fetching data from PxWeb API: {url}...")
-    response = requests.post(url, json=query)
-    
-    if response.status_code != 200:
-        raise Exception(f"API request failed with status {response.status_code}: {response.text}")
-    
-    data = response.json()
-    
-    # Extract metadata and dataset label
-    dataset_title = data.get("label", "Statistics Iceland Dataset")
-    source_id = url.split("/")[-1].replace(".px", "")
-    
-    # Construct clean text chunks from the response for embedding
-    text_content = f"Dataset Title: {dataset_title}\nSource URL: {url}\nData retrieved from Statistics Iceland PxWeb API."
-    
-    documents = [{
-        "id": source_id,
-        "text": text_content,
-        "raw_json": json.dumps(data, ensure_ascii=False)
-    }]
-    
-    return documents
 
-def run_ingestion():
-    print("1. Loading embedding model (all-MiniLM-L6-v2)...")
-    model = SentenceTransformer('all-MiniLM-L6-v2')
+def saekja_toflu(tafla):
+    """Skilar titli, uppfærsludegi, víddum [(nafn, er_timi, [merki])] og línum [(merki..., gildi)]."""
+    url = f"{API_URL}/{tafla['slod']}"
+    meta = requests.get(url, timeout=60)
+    meta.raise_for_status()
+    meta = meta.json()
 
-    db_path = "./chroma_db_master"
-    if not os.path.exists(db_path):
-        print(f"⚠️ Error: '{db_path}' directory not found. Please download and extract the master database from Google Drive first!")
-        return
+    fyrirspurn = []
+    for vidd in meta["variables"]:
+        valin = tafla.get("sia", {}).get(vidd["code"])
+        if valin:
+            merki_i_kodi = {t.strip(): k for k, t in zip(vidd["values"], vidd["valueTexts"])}
+            vantar = [m for m in valin if m not in merki_i_kodi]
+            if vantar:
+                raise ValueError(f"{tafla['kodi']}: fann ekki {vantar} í víddinni {vidd['code']}")
+            val = {"filter": "item", "values": [merki_i_kodi[m] for m in valin]}
+        else:
+            val = {"filter": "all", "values": ["*"]}
+        fyrirspurn.append({"code": vidd["code"], "selection": val})
 
-    print("2. Connecting to local ChromaDB persistent client...")
-    client = chromadb.PersistentClient(path=db_path)
-    collection = client.get_or_create_collection(name="hagstofa_rag")
+    svar = requests.post(url, json={"query": fyrirspurn, "response": {"format": "json-stat2"}}, timeout=120)
+    svar.raise_for_status()
+    gogn = svar.json()
 
-    print("3. Fetching new data from Statistics Iceland PxWeb API...")
+    timavidd = {v["code"] for v in meta["variables"] if v.get("time")}
+    viddir = []
+    for nafn in gogn["id"]:
+        flokkur = gogn["dimension"][nafn]["category"]
+        rod = flokkur["index"]
+        kodar = sorted(rod, key=rod.get) if isinstance(rod, dict) else rod
+        viddir.append((nafn, nafn in timavidd, [flokkur["label"][k].strip() for k in kodar]))
+
+    # json-stat geymir gildin í einum lista, í sömu röð og margfeldi víddanna
+    gildi = gogn["value"]
+    if isinstance(gildi, dict):
+        gildi = [gildi.get(str(i)) for i in range(sum(1 for _ in itertools.product(*(v[2] for v in viddir))))]
+    linur = [(*merki, g) for merki, g in zip(itertools.product(*(v[2] for v in viddir)), gildi)]
+    return meta.get("title", tafla["heiti"]), gogn.get("updated", ""), viddir, linur
+
+
+def vista_toflu(con, tafla, titill, uppfaert, viddir, linur):
+    kodi = tafla["kodi"]
+    con.execute("DELETE FROM toflur WHERE kodi = ?", (kodi,))
+    con.execute("DELETE FROM viddir WHERE kodi = ?", (kodi,))
+    con.execute("DELETE FROM gildi WHERE kodi = ?", (kodi,))
+    con.execute("INSERT INTO toflur VALUES (?, ?, ?, ?)", (kodi, titill, uppfaert, f"{API_URL}/{tafla['slod']}"))
+    for rod, (nafn, er_timi, merki) in enumerate(viddir):
+        con.execute("INSERT INTO viddir VALUES (?, ?, ?, ?, ?)", (kodi, rod, nafn, int(er_timi), "\x1f".join(merki)))
+    con.executemany("INSERT INTO gildi VALUES (?, ?, ?)",
+                    ((kodi, "\x1f".join(lina[:-1]), lina[-1]) for lina in linur))
+
+
+def byggja_leit(con):
+    print(f"Byggi leit með {EMBED_MODEL}...")
+    model = SentenceTransformer(EMBED_MODEL)
+    client = chromadb.PersistentClient(path=CHROMA_DIR)
     try:
-        new_entries = fetch_and_process_pxweb_data(PXWEB_API_URL, PXWEB_QUERY)
-    except Exception as e:
-        print(f"❌ Ingestion failed: {e}")
-        return
+        client.delete_collection(LEIT_NAFN)
+    except Exception:
+        pass
+    leit = client.create_collection(LEIT_NAFN, metadata={"hnsw:space": "cosine"})
 
-    texts = [item["text"] for item in new_entries]
-    ids = [item["id"] for item in new_entries]
-    metadatas = [{"raw_json": item["raw_json"]} for item in new_entries]
+    til = {k for (k,) in con.execute("SELECT kodi FROM toflur")}
+    toflur = [t for t in TOFLUR if t["kodi"] in til and not t.get("adeins_serhlutur")]
+    lysingar = [t["lysing"] for t in toflur]
+    leit.add(ids=[t["kodi"] for t in toflur], documents=lysingar,
+             embeddings=model.encode(lysingar, normalize_embeddings=True).tolist())
+    print(f"✅ Leit tilbúin með {len(toflur)} töflum.")
 
-    print("4. Generating vector embeddings...")
-    embeddings = model.encode(texts).tolist()
 
-    print("5. Upserting data into ChromaDB collection...")
-    collection.upsert(
-        documents=texts,
-        embeddings=embeddings,
-        metadatas=metadatas,
-        ids=ids
-    )
+def main(koda=None):
+    os.makedirs(GOGN_DIR, exist_ok=True)
+    con = sqlite3.connect(DB_PATH)
+    con.executescript("""
+        CREATE TABLE IF NOT EXISTS toflur (kodi TEXT PRIMARY KEY, titill TEXT, uppfaert TEXT, url TEXT);
+        CREATE TABLE IF NOT EXISTS viddir (kodi TEXT, rod INTEGER, nafn TEXT, er_timi INTEGER, merki TEXT);
+        CREATE TABLE IF NOT EXISTS gildi (kodi TEXT, lykill TEXT, gildi REAL);
+        CREATE INDEX IF NOT EXISTS gildi_kodi ON gildi (kodi);
+    """)
 
-    print("✅ Ingestion and embedding completed successfully! New table added to ChromaDB.")
+    villur = []
+    for tafla in TOFLUR:
+        if koda and tafla["kodi"] not in koda:
+            continue
+        try:
+            titill, uppfaert, viddir, linur = saekja_toflu(tafla)
+            vista_toflu(con, tafla, titill, uppfaert, viddir, linur)
+            con.commit()
+            tomar = sum(1 for lina in linur if lina[-1] is None)
+            print(f"✅ {tafla['kodi']}: {len(linur)} línur, {tomar} tómar. {titill}")
+        except Exception as e:
+            villur.append(tafla["kodi"])
+            print(f"❌ {tafla['kodi']}: {e}")
+        time.sleep(1)  # vefþjónustan takmarkar fjölda fyrirspurna
+
+    byggja_leit(con)
+    con.close()
+    if villur:
+        print(f"⚠️ Tókst ekki að sækja: {', '.join(villur)}")
+        sys.exit(1)
+
 
 if __name__ == "__main__":
-    run_ingestion()
+    main(set(sys.argv[1:]) or None)
